@@ -16,7 +16,7 @@ export function bindInput(cv: HTMLCanvasElement, onChange: () => void) {
     const m = toWorld(cv, e);
     if (game.placing && e.button === 0) { place(game.placing, clamp(m.x, 0.5, W - 0.5), clamp(m.y, 0.5, H - 0.5), game.pa); return; }
     const h = game.sel ? handleOf(game.sel) : null;
-    if (h && Math.hypot(m.x - h.x, m.y - h.y) < 0.5) { turning = true; cv.setPointerCapture(e.pointerId); return; }   // pegou a alça
+    if (h && Math.hypot(m.x - h.x, m.y - h.y) < (e.pointerType === 'touch' ? 0.9 : 0.5)) { turning = true; cv.setPointerCapture(e.pointerId); return; }   // pegou a alça
     const p = topAt(m);
     if (e.button === 2) { if (p) remove(p); return; }
     game.sel = p ?? null; drag = p ? { dx: p.x - m.x, dy: p.y - m.y } : null; onChange();
