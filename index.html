@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Marimba Machine</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<meta name="theme-color" content="#12141c">
+<style>
+  :root { --bg:#12141c; --panel:#1b1e2a; --ink:#e8eaf2; --dim:#8a90a6; --acc:#ffd166; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--ink); font:15px system-ui,sans-serif; overflow:hidden; touch-action:none; }
+  #app { display:flex; flex-direction:column; height:100%; }
+  #bar { display:flex; gap:8px; align-items:center; padding:8px 12px; background:var(--panel); flex-wrap:wrap; }
+  #bar .sp { flex:1; }
+  #lvl { color:var(--dim); }
+  button { background:#2a2e40; color:var(--ink); border:1px solid #3a3f58; border-radius:8px; padding:8px 12px; font:inherit; cursor:pointer; }
+  button:hover:not(:disabled) { background:#353a52; }
+  button:disabled { opacity:.35; cursor:default; }
+  button.pri, #play { background:var(--acc); color:#222; border-color:var(--acc); font-weight:700; }
+  button.pri:hover:not(:disabled), #play:hover:not(:disabled) { background:#ffdc85; }
+  #hud { min-height:38px; display:flex; gap:18px; align-items:baseline; padding:6px 14px; background:#161925; border-bottom:1px solid #0004; font-weight:700; flex-wrap:wrap; }
+  #hud .t { font-size:20px; min-width:92px; } #hud .win { color:#06d6a0; } #hud .dim { font-weight:400; } #hud .st { color:var(--acc); margin-left:auto; font-size:20px; letter-spacing:2px; }
+  #main { flex:1; min-height:0; display:flex; }
+  #side { width:190px; padding:12px; background:var(--panel); border-top:1px solid #0004; overflow:auto; flex-shrink:0; }
+  #side h3 { margin:0 0 8px; font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim); }
+  #side h3:not(:first-child) { margin-top:18px; }
+  #inv { display:grid; grid-template-columns:repeat(2,1fr); gap:8px; }
+  #inv button { position:relative; aspect-ratio:1; padding:0; display:grid; place-items:center; }
+  #inv button svg { width:70%; height:70%; }
+  #inv button.on { background:#3b4160; outline:2px solid var(--acc); }
+  #inv .n { position:absolute; top:4px; right:4px; min-width:20px; height:20px; border-radius:10px; background:#0007; font-size:12px; line-height:20px; text-align:center; }
+  .row { display:flex; gap:8px; justify-content:center; }
+  #side .row button { flex:1; }
+  #help { color:var(--dim); font-size:12px; line-height:1.4; margin-top:18px; }
+  #stage { flex:1; min-width:0; position:relative; }
+  #stage.placing canvas { cursor:crosshair; }
+  canvas { position:absolute; inset:0; width:100%; height:100%; }
+  #msg, #menu { position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:#0009; z-index:5; }
+  #menu { position:fixed; }
+  .card { background:var(--panel); border:1px solid #3a3f58; border-radius:14px; padding:22px 28px; text-align:center; min-width:280px; }
+  .card h2 { margin:0 0 8px; } .big { font-size:34px; color:var(--acc); letter-spacing:4px; } .score { font-size:20px; font-weight:700; margin:6px 0; }
+  .dim { color:var(--dim); font-size:13px; }
+  #levels { display:grid; grid-template-columns:repeat(auto-fill,minmax(130px,1fr)); gap:10px; margin:14px 0; max-width:640px; }
+  #levels button { display:flex; flex-direction:column; align-items:center; gap:4px; padding:12px 8px; }
+  #levels b { font-size:22px; } #levels .st { color:var(--acc); }
+  @media (max-width:700px) {
+    #main { flex-direction:column-reverse; }
+    #side { width:auto; display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:8px; }
+    #side h3, #help { display:none; }
+    #inv { display:flex; flex-wrap:wrap; } #inv button { width:56px; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="bar">
+    <b>Marimba Machine</b><span id="lvl"></span>
+    <span class="sp"></span>
+    <button id="menuBtn">Fases</button>
+    <button id="reset">Reiniciar</button>
+    <button id="play">▶ Play</button>
+  </div>
+  <div id="hud"></div>
+  <div id="main">
+    <div id="side">
+      <h3>Peças</h3>
+      <div id="inv"></div>
+      <p id="jk" class="dim" style="margin:8px 0 0"></p>
+      <h3>Selecionada</h3>
+      <div class="row">
+        <button id="rotL" title="Girar (Q)">⟲</button>
+        <button id="rotR" title="Girar (E)">⟳</button>
+        <button id="del" title="Devolver peça (Del)">✕</button>
+      </div>
+      <p id="help">Clique num ícone: a peça aparece na cena. Clique onde quer colocá-la. Arraste para mover, gire com Q/E ou a roda do mouse. Esc cancela. Pegue as ★ no caminho!<br><br>🎮 Controle: analógico move · A coloca/pega · B cancela/devolve · LB/RB giram · X/Y trocam a peça · Start joga · Back abre as fases.</p>
+    </div>
+    <div id="stage"><canvas id="cv"></canvas><div id="msg"></div></div>
+  </div>
+</div>
+<div id="menu"><div class="card"><h2>Fases</h2><div id="levels"></div><button id="closeMenu">Fechar</button></div></div>
+<script type="module" src="/src/main.ts"></script>
+<script>if ("serviceWorker" in navigator && location.protocol !== "file:" && !/^(localhost|127.0.0.1)$/.test(location.hostname)) navigator.serviceWorker.register("sw.js");</script>
+</body>
+</html>

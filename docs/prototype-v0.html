@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Marimba Machine</title>
+<style>
+  :root { --bg:#12141c; --panel:#1b1e2a; --ink:#e8eaf2; --dim:#8a90a6; --acc:#ffd166; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--ink); font:15px system-ui,sans-serif; overflow:hidden; touch-action:none; }
+  #app { display:flex; flex-direction:column; height:100%; }
+  #bar { display:flex; gap:8px; align-items:center; padding:8px 12px; background:var(--panel); flex-wrap:wrap; }
+  #bar .sp { flex:1; }
+  button { background:#2a2e40; color:var(--ink); border:1px solid #3a3f58; border-radius:8px; padding:8px 12px; font:inherit; cursor:pointer; }
+  button:hover:not(:disabled) { background:#353a52; }
+  button:disabled { opacity:.35; cursor:default; }
+  #play { background:var(--acc); color:#222; border-color:var(--acc); font-weight:700; }
+  #stage { flex:1; min-height:0; position:relative; }
+  canvas { position:absolute; inset:0; width:100%; height:100%; }
+  #msg { position:absolute; inset:0; display:none; align-items:center; justify-content:center; flex-direction:column; gap:10px; background:#0008; font-size:28px; font-weight:700; text-align:center; }
+  #msg small { font-size:16px; font-weight:400; color:var(--dim); }
+  #main { flex:1; min-height:0; display:flex; }
+  #side { width:190px; padding:12px; background:var(--panel); border-top:1px solid #0004; overflow:auto; flex-shrink:0; }
+  #side h3 { margin:0 0 8px; font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim); }
+  #side h3:not(:first-child) { margin-top:18px; }
+  #inv { display:grid; grid-template-columns:repeat(2,1fr); gap:8px; }
+  #inv button { position:relative; aspect-ratio:1; padding:0; display:grid; place-items:center; }
+  #inv button svg { width:70%; height:70%; }
+  #inv button.on { background:#3b4160; outline:2px solid var(--acc); }
+  #inv .n { position:absolute; top:4px; right:4px; min-width:20px; height:20px; border-radius:10px; background:#0007; font-size:12px; line-height:20px; text-align:center; }
+  .row { display:flex; gap:8px; }
+  .row button { flex:1; }
+  #help { color:var(--dim); font-size:12px; line-height:1.4; margin-top:18px; }
+  #stage.placing canvas { cursor:crosshair; }
+  @media (max-width:700px) {
+    #main { flex-direction:column-reverse; }
+    #side { width:auto; display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:8px; }
+    #side h3, #help { display:none; }
+    #inv { flex-direction:row; flex-wrap:wrap; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="bar">
+    <b>Marimba Machine</b>
+    <span class="sp"></span>
+    <button id="reset">Reiniciar</button>
+    <button id="play">▶ Play</button>
+  </div>
+  <div id="main">
+    <div id="side">
+      <h3>Peças</h3>
+      <div id="inv"></div>
+      <h3>Selecionada</h3>
+      <div class="row">
+        <button id="rotL" title="Girar (Q)">⟲</button>
+        <button id="rotR" title="Girar (E)">⟳</button>
+        <button id="del" title="Devolver peça (Del)">✕</button>
+      </div>
+      <p id="help">Clique num ícone: a peça aparece na cena. Clique onde quer colocá-la. Arraste para mover, gire com Q/E ou a roda do mouse. Esc cancela.</p>
+    </div>
+    <div id="stage"><canvas id="cv"></canvas><div id="msg"></div></div>
+  </div>
+</div>
+<script src="lib/planck.min.js"></script>
+<script>
+const { World, Vec2, Circle, Box } = planck;
+const W = 24, H = 15;               // mundo em metros (y para baixo)
+const STEP = 1 / 60;
+const PENTA = [0, 2, 4, 7, 9];      // escala pentatônica maior
+
+// ---------- FASE (dados) ----------
+const LEVEL = {
+  id: 1,
+  par: 1.67,   // tempo de referência (s), achado por busca aleatória + hill-climb (não é ótimo provado)
+  // montagem de referência: rampa (16.687,5.33,a0.609) rampa (17.65,13.674,a-0.291) taco (3.42,4.167,a-1.449) bumper (7.059,4.576)
+  ball: { x: 2, y: 1.8 },
+  bucket: { x: 20.5, y: 14.4, w: 3.6 },
+  fixed: [
+    { x: 3.6, y: 4.2, a: 0.22, len: 5 },       // rampa de saída
+    { x: 15, y: 12.5, a: 0, len: 0.6, h: 4.5 },  // parede
+  ],
+  inventory: { ramp: 2, bumper: 1, bat: 1 },
+};
+
+// ---------- ÁUDIO: marimba sintética ----------
+let ac;
+function audio() { return ac || (ac = new (window.AudioContext || window.webkitAudioContext)()); }
+function marimba(semi, vol = 0.8) {
+  if (window.__game && window.__game.mute) return;
+  const c = audio(), t = c.currentTime, f = 261.63 * Math.pow(2, semi / 12);
+  const g = c.createGain();
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(0.5 * vol, t + 0.004);
+  g.gain.exponentialRampToValueAtTime(0.0008, t + 0.9);
+  g.connect(c.destination);
+  for (const [m, amp, dec] of [[1, 1, 0.9], [4, 0.35, 0.18], [9.9, 0.1, 0.06]]) {
+    const o = c.createOscillator(), og = c.createGain();
+    o.frequency.value = f * m; og.gain.setValueAtTime(amp, t);
+    og.gain.exponentialRampToValueAtTime(0.001, t + dec);
+    o.connect(og).connect(g); o.start(t); o.stop(t + 1);
+  }
+}
+const noteOf = i => PENTA[i % 5] + 12 * Math.floor(i / 5);
+
+// ---------- PEÇAS (definições) ----------
+const DEFS = {
+  ramp:   { label: 'Rampa',   color: '#4cc9f0', len: 3 },
+  bumper: { label: 'Bumper',  color: '#f72585', r: 0.7 },
+  bat:    { label: 'Taco',    color: '#ffd166', len: 2.6, amp: 1.5, period: 1.8 },
+};
+const ICONS = {   // ícones da barra lateral
+  ramp:   '<svg viewBox="0 0 40 40"><rect x="4" y="17" width="32" height="7" rx="3.5" fill="COLOR" transform="rotate(-20 20 20)"/></svg>',
+  bumper: '<svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="12" fill="COLOR"/><circle cx="20" cy="20" r="17" fill="none" stroke="COLOR" stroke-opacity=".4" stroke-width="2"/></svg>',
+  bat:    '<svg viewBox="0 0 40 40"><rect x="9" y="17" width="27" height="6" rx="3" fill="COLOR" transform="rotate(-35 9 20)"/><circle cx="9" cy="20" r="4" fill="#fff"/></svg>',
+};
+// ponytail: taco com ciclo fixo (período/amplitude na definição); parametrizar por peça se o design pedir.
+function batAngle(base, t, d) {         // ângulo do taco no tempo t (swing rápido, volta lenta)
+  const p = (t % d.period) / d.period;
+  const s = p < 0.1 ? p / 0.1 : p < 0.45 ? 1 - (p - 0.1) / 0.35 : 0;
+  return base - d.amp * s;
+}
+
+// ---------- ESTADO ----------
+const state = { pieces: [], sel: null, placing: null, pa: 0, mouse: null, playing: false, result: null, t: 0, world: null, ball: null, acc: 0, trail: [], fx: [], still: 0 };
+const left = type => LEVEL.inventory[type] - state.pieces.filter(p => p.type === type).length;
+let noteCounter = 0;
+
+const defAngle = t => (t === 'bat' ? 0.5 : 0);
+function addPiece(type, x = 12, y = 7, a = defAngle(type)) {
+  if (state.playing || left(type) <= 0) return;
+  const p = { type, x, y, a, note: noteOf(noteCounter++ * 2 + 3) };
+  state.pieces.push(p); state.sel = p; state.placing = null; ui();
+}
+function pick(type) {   // clicou na barra lateral: próxima clique na cena coloca a peça
+  if (state.playing || left(type) <= 0) return;
+  state.placing = state.placing === type ? null : type; state.pa = defAngle(type); state.sel = null; state.mouse = { x: 12, y: 7 }; ui();   // já aparece no centro; segue o mouse
+}
+function rotate(da) { if (state.playing) return; if (state.placing) state.pa += da; else if (state.sel) state.sel.a += da; }
+function remove() {
+  if (state.sel && !state.playing) { state.pieces = state.pieces.filter(p => p !== state.sel); state.sel = null; ui(); }
+}
+
+// ---------- SIMULAÇÃO ----------
+function bar(w, x, y, a, len, h, note, d) {
+  const b = w.createBody({ type: 'static', position: Vec2(x, y), angle: a });
+  b.createFixture(Box(len / 2, h / 2), { friction: 0.2, restitution: 0.25 });
+  b.setUserData({ note, color: d });
+  return b;
+}
+function build() {
+  const w = new World({ gravity: Vec2(0, 14) });
+  const wall = (x, y, hx, hy) => bar(w, x, y, 0, hx * 2, hy * 2, null);
+  wall(12, H + 0.5, 12.5, 0.5); wall(12, -0.5, 12.5, 0.5); wall(-0.5, 7.5, 0.5, 8); wall(W + 0.5, 7.5, 0.5, 8);
+  LEVEL.fixed.forEach((f, i) => { f.body = bar(w, f.x, f.y, f.a, f.len, f.h || 0.35, noteOf(i)); });
+  // balde: 2 paredes + fundo + sensor
+  const { x, y, w: bw } = LEVEL.bucket;
+  for (const s of [-1, 1]) bar(w, x + s * (bw / 2 + 0.25), y - 0.9, s * 0.4, 0.3, 2, null);   // paredes inclinadas = funil
+  const sens = w.createBody({ type: 'static', position: Vec2(x, y - 0.3) });
+  sens.createFixture(Box(bw / 2 - 0.2, 0.3), { isSensor: true });
+  sens.setUserData({ bucket: true });
+  // bola
+  const ball = w.createDynamicBody({ position: Vec2(LEVEL.ball.x, LEVEL.ball.y), bullet: true });
+  ball.createFixture(Circle(0.3), { density: 1, friction: 0.15, restitution: 0.35 });
+  ball.setUserData({ ball: true });
+  // peças do jogador
+  for (const p of state.pieces) {
+    const d = DEFS[p.type];
+    if (p.type === 'ramp') p.body = bar(w, p.x, p.y, p.a, d.len, 0.3, p.note);
+    if (p.type === 'bumper') {
+      p.body = w.createBody({ type: 'static', position: Vec2(p.x, p.y) });
+      p.body.createFixture(Circle(d.r), { restitution: 1.25, friction: 0 });
+      p.body.setUserData({ note: p.note });
+    }
+    if (p.type === 'bat') {   // pivô na ponta, braço para a frente
+      p.body = w.createKinematicBody({ position: Vec2(p.x, p.y), angle: p.a });
+      p.body.createFixture(Box(d.len / 2, 0.18, Vec2(d.len / 2, 0), 0), { restitution: 0.6, friction: 0.1 });
+      p.body.setUserData({ note: p.note });
+    }
+  }
+  w.on('post-solve', (c, imp) => {
+    const A = c.getFixtureA().getBody().getUserData() || {}, B = c.getFixtureB().getBody().getUserData() || {};
+    const o = A.ball ? B : B.ball ? A : null, ballB = A.ball ? c.getFixtureA().getBody() : B.ball ? c.getFixtureB().getBody() : null;
+    if (!o || o.bucket) return;
+    const i = imp.normalImpulses[0] || 0;
+    if (i < 0.12) return;
+    const now = performance.now();
+    if (o.cool && now - o.cool < 70) return;
+    o.cool = now;
+    if (o.note != null) marimba(o.note, Math.min(1, 0.25 + i / 1.2));
+    const p = ballB.getPosition(); state.fx.push({ x: p.x, y: p.y, t: 0, c: o.color || '#fff' });
+  });
+  w.on('begin-contact', c => {
+    const A = c.getFixtureA().getBody().getUserData() || {}, B = c.getFixtureB().getBody().getUserData() || {};
+    if ((A.bucket && B.ball) || (B.bucket && A.ball)) state.inSince = state.t;   // vitória só se ficar dentro (ver tick)
+  });
+  w.on('end-contact', c => {
+    const A = c.getFixtureA().getBody().getUserData() || {}, B = c.getFixtureB().getBody().getUserData() || {};
+    if ((A.bucket && B.ball) || (B.bucket && A.ball)) state.inSince = null;
+  });
+  state.world = w; state.ball = ball;
+}
+function win(time) {
+  if (state.result) return;
+  state.result = 'win';
+  [0, 4, 7, 12].forEach((n, i) => setTimeout(() => marimba(n + 12, 0.9), i * 110));
+  const n = state.pieces.length, stars = n <= 2 ? 3 : n <= 3 ? 2 : 1;
+  let best = null, key = 'mm_best_' + LEVEL.id;
+  try { best = +localStorage.getItem(key) || null; if (!best || time < best) localStorage.setItem(key, best = time); } catch (e) { best = time; }
+  const rec = time <= best + 1e-9 ? ' · novo recorde!' : '';
+  msg(`Fase completa!<br>${'★'.repeat(stars)}${'☆'.repeat(3 - stars)}<small>⏱ ${time.toFixed(2)}s${rec}<br>Seu recorde ${best.toFixed(2)}s · Referência ${LEVEL.par.toFixed(2)}s<br>${n} peça(s) usada(s) · Reiniciar para ajustar</small>`);
+  state.winTime = time;
+}
+function play() {
+  audio().resume();
+  if (state.playing) return;
+  state.sel = null; state.playing = true; state.result = null; state.t = 0; state.acc = 0; state.trail = []; state.still = 0; state.inSince = null;
+  build(); ui();
+}
+function reset() {
+  state.playing = false; state.result = null; state.world = null; msg(''); state.fx = []; state.trail = [];
+  state.pieces.forEach(p => delete p.body); ui();
+}
+function tick(dt) {
+  if (!state.playing || !state.world) return;
+  state.acc += Math.min(dt, 0.1);
+  while (state.acc >= STEP) {
+    state.acc -= STEP; state.t += STEP;
+    for (const p of state.pieces) if (p.type === 'bat') {   // taco cinemático: ângulo + velocidade angular exatos
+      const d = DEFS.bat, a0 = batAngle(p.a, state.t - STEP, d), a1 = batAngle(p.a, state.t, d);
+      p.body.setAngle(a1); p.body.setAngularVelocity((a1 - a0) / STEP);
+    }
+    state.world.step(STEP, 8, 3);
+    if (!state.result && state.inSince != null && state.t - state.inSince >= 0.3) win(state.inSince);   // ficou 0,3 s no balde
+  }
+  const bp = state.ball.getPosition();
+  state.trail.push({ x: bp.x, y: bp.y }); if (state.trail.length > 40) state.trail.shift();
+  if (!state.result) {
+    state.still = state.ball.getLinearVelocity().length() < 0.15 ? state.still + dt : 0;
+    if (state.still > 2.5 || bp.y > H + 2) { state.result = 'fail'; msg('Não foi dessa vez<small>Reiniciar e ajustar as peças</small>'); }
+  }
+}
+
+// ---------- UI / ENTRADA ----------
+const $ = id => document.getElementById(id);
+function msg(html) { const m = $('msg'); m.innerHTML = html; m.style.display = html ? 'flex' : 'none'; }
+function ui() {
+  $('inv').innerHTML = '';
+  for (const t in DEFS) {
+    const b = document.createElement('button');
+    b.innerHTML = `${ICONS[t].replace('COLOR', DEFS[t].color)}<span class="n">${left(t)}</span>`; b.disabled = state.playing || left(t) <= 0;
+    b.title = DEFS[t].label; b.setAttribute('aria-label', DEFS[t].label); b.className = state.placing === t ? 'on' : ''; b.onclick = () => pick(t);
+    $('inv').appendChild(b);
+  }
+  $('stage').classList.toggle('placing', !!state.placing);
+  $('play').disabled = state.playing;
+  $('rotL').disabled = $('rotR').disabled = state.playing || !(state.sel || state.placing);
+  $('del').disabled = state.playing || !state.sel;
+}
+$('play').onclick = play; $('reset').onclick = reset;
+$('rotL').onclick = () => rotate(-0.15); $('rotR').onclick = () => rotate(0.15); $('del').onclick = () => { remove(); };
+addEventListener('keydown', e => {
+  if (e.key === 'q') rotate(-0.15); if (e.key === 'e') rotate(0.15);
+  if (e.key === 'Escape' && state.placing) { state.placing = null; ui(); }
+  if (e.key === 'Delete' || e.key === 'Backspace') remove();
+  if (e.key === ' ') { e.preventDefault(); state.playing ? reset() : play(); }
+});
+
+const cv = $('cv'), g = cv.getContext('2d');
+let S = 40, OX = 0, OY = 0;
+function resize() {
+  const r = cv.getBoundingClientRect(), dpr = devicePixelRatio || 1;
+  cv.width = r.width * dpr; cv.height = r.height * dpr;
+  S = Math.min(r.width / W, r.height / H) * dpr; OX = (cv.width - W * S) / 2; OY = (cv.height - H * S) / 2;
+}
+addEventListener('resize', resize);
+const toWorld = e => { const r = cv.getBoundingClientRect(), d = devicePixelRatio || 1; return { x: ((e.clientX - r.left) * d - OX) / S, y: ((e.clientY - r.top) * d - OY) / S }; };
+function hit(p, m) {
+  const d = DEFS[p.type], c = Math.cos(-p.a), s = Math.sin(-p.a);
+  const lx = (m.x - p.x) * c - (m.y - p.y) * s, ly = (m.x - p.x) * s + (m.y - p.y) * c;
+  if (p.type === 'bumper') return Math.hypot(lx, ly) < d.r + 0.2;
+  if (p.type === 'ramp') return Math.abs(lx) < d.len / 2 + 0.2 && Math.abs(ly) < 0.5;
+  return lx > -0.5 && lx < d.len + 0.2 && Math.abs(ly) < 0.5;
+}
+let drag = null;
+cv.addEventListener('pointerdown', e => {
+  if (state.playing) return;
+  const m = toWorld(e);
+  if (state.placing && e.button === 0) {   // coloca onde o jogador clicou
+    const t = state.placing;
+    addPiece(t, Math.max(0.5, Math.min(W - 0.5, m.x)), Math.max(0.5, Math.min(H - 0.5, m.y)), state.pa); return;
+  }
+  if (e.button === 2) { const p = [...state.pieces].reverse().find(q => hit(q, m)); if (p) { state.sel = p; remove(); } return; }
+  const p = [...state.pieces].reverse().find(q => hit(q, m));
+  state.sel = p || null; if (p) drag = { dx: p.x - m.x, dy: p.y - m.y }; ui();
+  cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener('pointermove', e => {
+  state.mouse = toWorld(e);
+  if (!drag || !state.sel) return;
+  const m = toWorld(e); state.sel.x = Math.max(0.5, Math.min(W - 0.5, m.x + drag.dx)); state.sel.y = Math.max(0.5, Math.min(H - 0.5, m.y + drag.dy));
+});
+cv.addEventListener('pointerup', () => { drag = null; });
+cv.addEventListener('contextmenu', e => e.preventDefault());
+cv.addEventListener('wheel', e => { e.preventDefault(); rotate(Math.sign(e.deltaY) * 0.1); }, { passive: false });
+
+// ---------- DESENHO ----------
+function draw() {
+  g.setTransform(1, 0, 0, 1, 0, 0); g.fillStyle = '#12141c'; g.fillRect(0, 0, cv.width, cv.height);
+  g.setTransform(S, 0, 0, S, OX, OY);
+  g.fillStyle = '#181b27'; g.fillRect(0, 0, W, H);
+  const rect = (x, y, a, x0, w, h, col, glow) => {
+    g.save(); g.translate(x, y); g.rotate(a); g.fillStyle = col; if (glow) { g.shadowColor = col; g.shadowBlur = 0.5 * S; }
+    g.beginPath(); g.roundRect(x0, -h / 2, w, h, Math.min(h / 2, 0.15)); g.fill(); g.restore();
+  };
+  const bodyAng = p => (p.body ? p.body.getAngle() : p.a);
+  for (const f of LEVEL.fixed) rect(f.x, f.y, f.a, -f.len / 2, f.len, f.h || 0.35, '#5a607a');
+  rect(0, 0, 0, -1, 1, 0.01, 'transparent');
+  const { x, y, w: bw } = LEVEL.bucket;
+  const happy = state.result === 'win', bob = happy ? Math.sin(performance.now() / 120) * 0.08 : 0;
+  g.fillStyle = '#06d6a026'; g.beginPath(); g.moveTo(x - bw / 2 - 0.9, y - 1.9); g.lineTo(x + bw / 2 + 0.9, y - 1.9); g.lineTo(x + bw / 2, y); g.lineTo(x - bw / 2, y); g.fill();
+  for (const s of [-1, 1]) rect(x + s * (bw / 2 + 0.25), y - 0.9, s * 0.4, -0.15, 0.3, 2, '#06d6a0', happy);
+  g.save(); g.translate(x, y - 1.35 + bob); g.fillStyle = '#e8fff7'; g.strokeStyle = '#e8fff7'; g.lineWidth = 0.1; g.lineCap = 'round';
+  for (const s of [-1, 1]) { g.beginPath(); if (happy) g.arc(s * 0.55, 0, 0.18, Math.PI, 0); else g.arc(s * 0.55, 0, 0.14, 0, 7); happy ? g.stroke() : g.fill(); }
+  g.beginPath(); g.arc(0, 0.2, happy ? 0.55 : 0.4, 0.15 * Math.PI, 0.85 * Math.PI); g.stroke(); g.restore();
+  const ghost = state.placing && state.mouse && !state.playing ? { type: state.placing, x: state.mouse.x, y: state.mouse.y, a: state.pa } : null;
+  for (const p of ghost ? [...state.pieces, ghost] : state.pieces) {
+    const d = DEFS[p.type], sel = p === state.sel || p === ghost, a = bodyAng(p);
+    g.globalAlpha = p === ghost ? 0.5 : 1;
+    if (p.type === 'ramp') rect(p.x, p.y, a, -d.len / 2, d.len, 0.3, d.color, sel);
+    if (p.type === 'bat') {
+      rect(p.x, p.y, a, 0, d.len, 0.36, d.color, sel);
+      g.fillStyle = '#fff'; g.beginPath(); g.arc(p.x, p.y, 0.22, 0, 7); g.fill();
+    }
+    if (p.type === 'bumper') { g.save(); g.fillStyle = d.color; if (sel) { g.shadowColor = d.color; g.shadowBlur = 0.5 * S; } g.beginPath(); g.arc(p.x, p.y, d.r, 0, 7); g.fill(); g.restore(); }
+    if (sel && !state.playing) { g.strokeStyle = '#fff'; g.lineWidth = 0.05; g.setLineDash([0.2, 0.2]); g.beginPath(); g.arc(p.x, p.y, (p.type === 'bat' ? d.len : d.len ? d.len / 2 : d.r) + 0.3, 0, 7); g.stroke(); g.setLineDash([]); }
+  }
+  g.globalAlpha = 1;
+  state.trail.forEach((t, i) => { g.fillStyle = `rgba(255,255,255,${i / state.trail.length * 0.25})`; g.beginPath(); g.arc(t.x, t.y, 0.3 * i / state.trail.length, 0, 7); g.fill(); });
+  state.fx = state.fx.filter(f => (f.t += 0.04) < 1);
+  for (const f of state.fx) { g.strokeStyle = f.c; g.globalAlpha = 1 - f.t; g.lineWidth = 0.08; g.beginPath(); g.arc(f.x, f.y, 0.3 + f.t * 1.2, 0, 7); g.stroke(); g.globalAlpha = 1; }
+  g.save(); g.font = '700 0.8px system-ui'; g.fillStyle = state.result === 'win' ? '#06d6a0' : '#e8eaf2'; g.textBaseline = 'top';
+  g.fillText(`⏱ ${(state.result === 'win' ? state.winTime : state.playing ? state.t : 0).toFixed(2)}s`, 0.4, 0.3);
+  g.font = '0.5px system-ui'; g.fillStyle = '#8a90a6'; g.fillText(`Referência ${LEVEL.par.toFixed(2)}s`, 0.4, 1.2); g.restore();
+  const bp = state.playing && state.ball ? state.ball.getPosition() : LEVEL.ball;
+  g.fillStyle = '#fff'; g.shadowColor = '#fff'; g.shadowBlur = 0.4 * S; g.beginPath(); g.arc(bp.x, bp.y, 0.3, 0, 7); g.fill(); g.shadowBlur = 0;
+}
+let last = performance.now();
+function loop(now) { tick((now - last) / 1000); last = now; draw(); requestAnimationFrame(loop); }
+resize(); ui(); requestAnimationFrame(loop);
+window.__game = { state, LEVEL, play, reset, addPiece, tick, mute: false };   // para testes
+</script>
+</body>
+</html>
